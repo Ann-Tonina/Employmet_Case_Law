@@ -1,9 +1,5 @@
-chromadb>=0.4.0
-sentence-transformers>=2.2.0
-torch
-transformers
-numpy
-pandas
-scikit-learn
-beautifulsoup4
-requests
+streamlit
+chromadb
+google-generativeai
+sentence-transformers
+pysqlite3-binary
