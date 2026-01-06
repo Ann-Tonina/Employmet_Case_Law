@@ -1,77 +1,94 @@
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+
 import streamlit as st
 import chromadb
 import google.generativeai as genai
 from sentence_transformers import SentenceTransformer
 import os
 
-# --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Kenya Employment Law Bot", page_icon="⚖️", layout="wide")
+# --- 1. PAGE CONFIGURATION ---
+st.set_page_config(page_title="Kenya Law Discovery", page_icon="⚖️", layout="wide")
 
-# --- LOAD MODELS & DB (Cached to stay fast) ---
+# --- 2. AUTHENTICATION (The fix that worked) ---
+def get_verified_key():
+    env_key = os.environ.get("GOOGLE_API_KEY")
+    if env_key: return env_key
+    if "GOOGLE_API_KEY" in st.secrets: return st.secrets["GOOGLE_API_KEY"]
+    return None
+
+api_key = get_verified_key()
+if not api_key:
+    st.error("❌ API Key Missing. Please set the Windows Environment Variable.")
+    st.stop()
+
+# --- 3. RESOURCE CACHING ---
 @st.cache_resource
-def load_resources():
-    # Load Embedding Model
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-    
-    # Connect to ChromaDB
-    db_path = "./kenya_law_db"
-    client = chromadb.PersistentClient(path=db_path)
-    collection = client.get_or_create_collection(name="employment_case_law")
-    
-    # Configure Gemini
-    # Note: In production, use st.secrets for the API key
-    genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
+def load_system():
+    # Configure Gemini 3 Flash (2026 flagship model)
+    genai.configure(api_key=api_key)
     llm = genai.GenerativeModel('gemini-3-flash-preview')
     
-    return model, collection, llm
+    # Load Sentence Transformer for legal embeddings
+    embedder = SentenceTransformer("all-MiniLM-L6-v2")
+    
+    # Initialize Persistent ChromaDB
+    # Update path to "./kenya_law_db" if that is your folder name
+    client = chromadb.PersistentClient(path="./database")
+    collection = client.get_or_create_collection(name="employment_case_law")
+    
+    return llm, embedder, collection
 
-model, collection, llm = load_resources()
+llm, embedder, collection = load_system()
 
-# --- UI HEADER ---
-st.title("⚖️ Kenya Employment Law Research Bot")
-st.markdown("Find authoritative answers with citations from the **ELRC** and **Court of Appeal**.")
+# --- 4. USER INTERFACE ---
+st.title("⚖️ Kenyan Employment Law Discovery")
+st.markdown("Search ELRC judgments and get AI-summarized legal precedents.")
 
-# --- SIDEBAR (History & Info) ---
-with st.sidebar:
-    st.header("Search Settings")
-    n_results = st.slider("Number of cases to cite", 1, 5, 3)
-    st.info("This tool uses Retrieval-Augmented Generation (RAG) to ensure answers are based on actual Kenyan case law.")
-
-# --- SEARCH INTERFACE ---
-query = st.text_input("Describe the legal issue (e.g., 'Procedure for unfair dismissal'):")
+query = st.text_input("Ask a question (e.g., 'What are the grounds for summary dismissal?'):")
 
 if query:
-    with st.spinner("Searching case law and generating answer..."):
-        # 1. Retrieval
-        query_embedding = model.encode([query]).tolist()
-        results = collection.query(
-            query_embeddings=query_embedding,
-            n_results=n_results,
-            include=["documents", "metadatas"]
-        )
-        
-        # 2. Build Context
-        context_parts = []
-        for i in range(len(results['documents'][0])):
-            doc = results['documents'][0][i]
-            meta = results['metadatas'][0][i]
-            context_parts.append(f"Source [{meta['case_title']}]:\n{doc}")
-        
-        full_context = "\n\n".join(context_parts)
-        
-        # 3. LLM Generation
-        prompt = f"Use the following Kenyan legal context to answer: {query}\n\nCONTEXT:\n{full_context}"
-        response = llm.generate_content(prompt)
-        
-        # 4. Display Results
-        st.subheader("Legal Findings")
-        st.write(response.text)
-        
-        # 5. Citations Expander
-        with st.expander("View Cited Sources"):
-            for i in range(len(results['metadatas'][0])):
-                m = results['metadatas'][0][i]
-                st.markdown(f"**{m['case_title']}**")
-                st.caption(f"Court: {m['court']} | Date: {m['decision_date']}")
-                st.write(results['documents'][0][i][:300] + "...")
-                st.divider()
+    with st.spinner("Searching case law and reasoning..."):
+        try:
+            # Step A: Semantic Vector Search
+            # We encode the query to match the math of the database
+            query_vec = embedder.encode([query]).tolist()
+            results = collection.query(query_embeddings=query_vec, n_results=3)
+            
+            # Step B: Build Legal Context
+            context = ""
+            if results['documents']:
+                for doc in results['documents'][0]:
+                    context += f"\n[DOCUMENT START]\n{doc}\n[DOCUMENT END]\n"
+            
+            # Step C: Gemini 3 Reasoning
+            # In 2026, we prompt the model to act as a Kenyan High Court Researcher
+            prompt = f"""
+            You are a Senior Researcher for the Kenyan High Court. 
+            Answer the user's question based ONLY on the provided ELRC judgments. 
+            Cite the case names if available in the text.
+
+            CONTEXT FROM DATABASE:
+            {context}
+
+            QUESTION:
+            {query}
+            """
+            
+            # Use 'minimal' thinking for high speed, or 'medium' for deep legal analysis
+            response = llm.generate_content(prompt)
+            
+            # Step D: Display Results
+            st.subheader("Legal Analysis")
+            st.markdown(response.text)
+            
+            with st.expander("📚 View Original Case Excerpts"):
+                for doc in results['documents'][0]:
+                    st.info(doc)
+                    
+        except Exception as e:
+            st.error(f"Error during search: {e}")
+
+# --- FOOTER ---
+st.sidebar.caption("System Status: Online (Gemini 3 Flash)")
